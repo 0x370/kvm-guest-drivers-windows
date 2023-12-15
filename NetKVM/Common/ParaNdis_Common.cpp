@@ -106,6 +106,7 @@ typedef struct _tagConfigurationEntries
     tConfigurationEntry USOv4Supported;
     tConfigurationEntry USOv6Supported;
 #endif
+    tConfigurationEntry MinRxBufferPercent;
 }tConfigurationEntries;
 
 static const tConfigurationEntries defaultConfiguration =
@@ -143,6 +144,7 @@ static const tConfigurationEntries defaultConfiguration =
     { "*UsoIPv4", 1, 0, 1},
     { "*UsoIPv6", 1, 0, 1},
 #endif
+    { "MinRxBufferPercent", PARANDIS_MIN_RX_BUFFER_PERCENT_DEFAULT, 0, 100},
 };
 
 static void ParaNdis_ResetVirtIONetDevice(PARANDIS_ADAPTER *pContext)
@@ -276,6 +278,7 @@ static void ReadNicConfiguration(PARANDIS_ADAPTER *pContext, PUCHAR pNewMACAddre
             GetConfigurationEntry(cfg, &pConfiguration->USOv4Supported);
             GetConfigurationEntry(cfg, &pConfiguration->USOv6Supported);
 #endif
+            GetConfigurationEntry(cfg, &pConfiguration->MinRxBufferPercent);
 
             bDebugPrint = pConfiguration->isLogEnabled.ulValue;
             virtioDebugLevel = pConfiguration->debugLevel.ulValue;
@@ -285,6 +288,7 @@ static void ReadNicConfiguration(PARANDIS_ADAPTER *pContext, PUCHAR pNewMACAddre
             pContext->uNumberOfHandledRXPacketsInDPC = pConfiguration->NumberOfHandledRXPacketsInDPC.ulValue;
             pContext->bDoSupportPriority = pConfiguration->PrioritySupport.ulValue != 0;
             pContext->Offload.flagsValue = 0;
+            pContext->MinRxBufferPercent = pConfiguration->MinRxBufferPercent.ulValue;
             // TX caps: 1 - TCP, 2 - UDP, 4 - IP, 8 - TCPv6, 16 - UDPv6
             if (pConfiguration->OffloadTxChecksum.ulValue & 1) pContext->Offload.flagsValue |= osbT4TcpChecksum | osbT4TcpOptionsChecksum;
             if (pConfiguration->OffloadTxChecksum.ulValue & 2) pContext->Offload.flagsValue |= osbT4UdpChecksum;
@@ -1662,7 +1666,7 @@ ProcessReceiveQueue; OS has no packets to be reinserted into the virtqueue,
 virtqueue eventually becomes empty and RxDPCWorkBody's loop exits  */
 
 static
-BOOLEAN RxDPCWorkBody(PARANDIS_ADAPTER *pContext, CPUPathBundle *pathBundle, ULONG nPacketsToIndicate)
+BOOLEAN RxDPCWorkBody(PARANDIS_ADAPTER *pContext, CPUPathBundle *pathBundle, PVOID pMiniportDpcContext, ULONG nPacketsToIndicate)
 {
     BOOLEAN res = FALSE;
     bool rxPathOwner = false;
@@ -1670,6 +1674,7 @@ BOOLEAN RxDPCWorkBody(PARANDIS_ADAPTER *pContext, CPUPathBundle *pathBundle, ULO
     ULONG nIndicate;
 
     CCHAR CurrCpuReceiveQueue = GetReceiveQueueForCurrentCPU(pContext);
+    BOOLEAN isRxBufferShortage = FALSE;
 
     indicate = nullptr;
     indicateTail = nullptr;
@@ -1682,12 +1687,20 @@ BOOLEAN RxDPCWorkBody(PARANDIS_ADAPTER *pContext, CPUPathBundle *pathBundle, ULO
     {
         rxPathOwner = pathBundle->rxPath.UnclassifiedPacketsQueue().Ownership.Acquire();
 
-        pathBundle->rxPath.ProcessRxRing(CurrCpuReceiveQueue);
+        isRxBufferShortage = pathBundle->rxPath.ProcessRxRing(CurrCpuReceiveQueue, pathBundle);
 
         if (rxPathOwner)
         {
             ProcessReceiveQueue(pContext, &nPacketsToIndicate, &pathBundle->rxPath.UnclassifiedPacketsQueue(),
                                 &indicate, &indicateTail, &nIndicate);
+        }
+    }
+    else
+    {
+        pathBundle = (CPUPathBundle*)pMiniportDpcContext;
+        if (pathBundle != nullptr)
+        {
+            isRxBufferShortage = pathBundle->rxPath.IsRxBuffersShortage();
         }
     }
 
@@ -1704,8 +1717,25 @@ BOOLEAN RxDPCWorkBody(PARANDIS_ADAPTER *pContext, CPUPathBundle *pathBundle, ULO
     {
         if(pContext->m_RxStateMachine.RegisterOutstandingItems(nIndicate))
         {
-            NdisMIndicateReceiveNetBufferLists(pContext->MiniportHandle,
-                                                indicate, 0, nIndicate, NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL);
+            if (!isRxBufferShortage)
+            {
+                NdisMIndicateReceiveNetBufferLists(pContext->MiniportHandle,
+                    indicate, 0, nIndicate,
+                    NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL);
+            }
+            else
+            {
+                /* If the number of available RX buffers is insufficient, we set the
+                NDIS_RECEIVE_FLAGS_RESOURCES flag so that the RX buffers can be immediately
+                reclaimed once the call to NdisMIndicateReceiveNetBufferLists returns. */
+
+                NdisMIndicateReceiveNetBufferLists(pContext->MiniportHandle,
+                    indicate, 0, nIndicate,
+                    NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL | NDIS_RECEIVE_FLAGS_RESOURCES);
+
+                ParaNdis_ReuseRxNBLs(indicate);
+                pContext->m_RxStateMachine.UnregisterOutstandingItems(nIndicate);
+            }
         }
         else
         {
@@ -1775,7 +1805,7 @@ void ParaNdis_CXDPCWorkBody(PARANDIS_ADAPTER *pContext)
     InterlockedDecrement(&pContext->counterDPCInside);
 }
 
-bool ParaNdis_RXTXDPCWorkBody(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIndicate)
+bool ParaNdis_RXTXDPCWorkBody(PARANDIS_ADAPTER *pContext, CPUPathBundle* pathBundle, PVOID pMiniportDpcContext, ULONG ulMaxPacketsToIndicate)
 {
     bool stillRequiresProcessing = false;
     UINT numOfPacketsToIndicate = min(ulMaxPacketsToIndicate, pContext->uNumberOfHandledRXPacketsInDPC);
@@ -1784,26 +1814,12 @@ bool ParaNdis_RXTXDPCWorkBody(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIn
 
     InterlockedIncrement(&pContext->counterDPCInside);
 
-    CPUPathBundle *pathBundle = nullptr;
-
-    if (pContext->nPathBundles == 1)
-    {
-        pathBundle = pContext->pPathBundles;
-    }
-    else
-    {
-        ULONG procIndex = ParaNdis_GetCurrentCPUIndex();
-        if (procIndex < pContext->nPathBundles)
-        {
-            pathBundle = pContext->pPathBundles + procIndex;
-        }
-    }
     /* When DPC is scheduled for RSS processing, it may be assigned to CPU that has no
     correspondent path, so pathBundle may remain null. */
 
     if (pContext->bEnableInterruptHandlingDPC)
     {
-        if (RxDPCWorkBody(pContext, pathBundle, numOfPacketsToIndicate))
+        if (RxDPCWorkBody(pContext, pathBundle, pMiniportDpcContext, numOfPacketsToIndicate))
         {
             stillRequiresProcessing = true;
         }

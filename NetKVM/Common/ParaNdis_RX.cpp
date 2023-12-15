@@ -128,7 +128,8 @@ int CParaNdisRX::PrepareReceiveBuffers()
     }
     /* TODO - NetMaxReceiveBuffers should take into account all queues */
     m_Context->NetMaxReceiveBuffers = m_NetNofReceiveBuffers;
-    DPrintf(0, "[%s] MaxReceiveBuffers %d\n", __FUNCTION__, m_Context->NetMaxReceiveBuffers);
+    m_MinRxBufferLimit = m_NetNofReceiveBuffers * m_Context->MinRxBufferPercent / 100;
+    DPrintf(0, "[%s] MaxReceiveBuffers %d, m_MinRxBufferLimit %u\n", __FUNCTION__, m_Context->NetMaxReceiveBuffers, m_MinRxBufferLimit);
     m_Reinsert = true;
 
     return nRet;
@@ -263,9 +264,9 @@ VOID CParaNdisRX::KickRXRing()
 }
 
 #if PARANDIS_SUPPORT_RSS
-static FORCEINLINE VOID ParaNdis_QueueRSSDpc(PARANDIS_ADAPTER *pContext, ULONG MessageIndex, PGROUP_AFFINITY pTargetAffinity)
+static FORCEINLINE VOID ParaNdis_QueueRSSDpc(PARANDIS_ADAPTER *pContext, ULONG MessageIndex, PGROUP_AFFINITY pTargetAffinity, PVOID pMiniportDpcContext)
 {
-    NdisMQueueDpcEx(pContext->InterruptHandle, MessageIndex, pTargetAffinity, NULL);
+    NdisMQueueDpcEx(pContext->InterruptHandle, MessageIndex, pTargetAffinity, pMiniportDpcContext);
 }
 
 static FORCEINLINE CCHAR ParaNdis_GetScalingDataForPacket(PARANDIS_ADAPTER *pContext, PNET_PACKET_INFO pPacketInfo, PPROCESSOR_NUMBER pTargetProcessor)
@@ -373,7 +374,7 @@ static void LogRedirectedPacket(pRxNetDescriptor pBufferDescriptor)
 }
 #endif
 
-VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
+BOOLEAN CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue, PVOID pMiniportDPCContext)
 {
     pRxNetDescriptor pBufferDescriptor;
     unsigned int nFullLength;
@@ -431,7 +432,7 @@ VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
             if (nTargetReceiveQueueNum != nCurrCpuReceiveQueue)
             {
                 ParaNdis_ProcessorNumberToGroupAffinity(&TargetAffinity, &TargetProcessor);
-                ParaNdis_QueueRSSDpc(m_Context, m_messageIndex, &TargetAffinity);
+                ParaNdis_QueueRSSDpc(m_Context, m_messageIndex, &TargetAffinity, pMiniportDPCContext);
                 m_Context->extraStatistics.framesRSSMisses++;
                 LogRedirectedPacket(pBufferDescriptor);
             }
@@ -444,6 +445,7 @@ VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
        ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pBufferDescriptor);
 #endif
     }
+    return IsRxBuffersShortage();
 }
 
 void CParaNdisRX::PopulateQueue()

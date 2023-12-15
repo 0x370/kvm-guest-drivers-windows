@@ -357,6 +357,25 @@ VOID GetAffinityForCurrentCpu(PGROUP_AFFINITY pAffinity)
 
 #endif
 
+static CPUPathBundle* GetPathBundleForCurrentCPU(PARANDIS_ADAPTER* pContext)
+{
+    CPUPathBundle* pathBundle = nullptr;
+
+    if (pContext->nPathBundles == 1)
+    {
+        pathBundle = pContext->pPathBundles;
+    }
+    else
+    {
+        ULONG procIndex = ParaNdis_GetCurrentCPUIndex();
+        if (procIndex < pContext->nPathBundles)
+        {
+            pathBundle = pContext->pPathBundles + procIndex;
+        }
+    }
+    return pathBundle;
+}
+
 /**********************************************************
 NDIS-required procedure for DPC handling
 Parameters:
@@ -371,28 +390,29 @@ static VOID MiniportInterruptDPC(
 {
     PARANDIS_ADAPTER *pContext = (PARANDIS_ADAPTER *)MiniportInterruptContext;
     bool requiresDPCRescheduling;
+    CPUPathBundle* pathBundle = GetPathBundleForCurrentCPU(pContext);
 
 #if NDIS_SUPPORT_NDIS620
     PNDIS_RECEIVE_THROTTLE_PARAMETERS RxThrottleParameters = (PNDIS_RECEIVE_THROTTLE_PARAMETERS)ReceiveThrottleParameters;
     DEBUG_ENTRY(5);
     RxThrottleParameters->MoreNblsPending = 0;
-    requiresDPCRescheduling = ParaNdis_RXTXDPCWorkBody(pContext, RxThrottleParameters->MaxNblsToIndicate);
+    requiresDPCRescheduling = ParaNdis_RXTXDPCWorkBody(pContext, pathBundle, MiniportDpcContext, RxThrottleParameters->MaxNblsToIndicate);
     if (requiresDPCRescheduling)
-        {
-            GROUP_AFFINITY Affinity;
-            GetAffinityForCurrentCpu(&Affinity);
+    {
+        GROUP_AFFINITY Affinity;
+        GetAffinityForCurrentCpu(&Affinity);
 
-            NdisMQueueDpcEx(pContext->InterruptHandle, 0, &Affinity, MiniportDpcContext);
-        }
+        NdisMQueueDpcEx(pContext->InterruptHandle, 0, &Affinity, pathBundle ? pathBundle : MiniportDpcContext);
+    }
 #else /* NDIS 6.0*/
     DEBUG_ENTRY(5);
     UNREFERENCED_PARAMETER(ReceiveThrottleParameters);
 
-    requiresDPCRescheduling = ParaNdis_RXTXDPCWorkBody(pContext, PARANDIS_UNLIMITED_PACKETS_TO_INDICATE);
+    requiresDPCRescheduling = ParaNdis_RXTXDPCWorkBody(pContext, pathBundle, MiniportDpcContext, PARANDIS_UNLIMITED_PACKETS_TO_INDICATE);
     if (requiresDPCRescheduling)
     {
         DPrintf(4, "[%s] Queued additional DPC for %d\n", __FUNCTION__,  requiresDPCRescheduling);
-        NdisMQueueDpc(pContext->InterruptHandle, 0, 1 << KeGetCurrentProcessorNumber(), MiniportDpcContext);
+        NdisMQueueDpc(pContext->InterruptHandle, 0, 1 << KeGetCurrentProcessorNumber(), pathBundle ? pathBundle : MiniportDpcContext);
     }
 #endif /* NDIS_SUPPORT_NDIS620 */
 
@@ -440,27 +460,28 @@ static VOID MiniportMSIInterruptDpc(
 {
     PARANDIS_ADAPTER *pContext = (PARANDIS_ADAPTER *)MiniportInterruptContext;
     bool requireDPCRescheduling;
+    CPUPathBundle* pathBundle = GetPathBundleForCurrentCPU(pContext);
 
 #if NDIS_SUPPORT_NDIS620
     PNDIS_RECEIVE_THROTTLE_PARAMETERS RxThrottleParameters = (PNDIS_RECEIVE_THROTTLE_PARAMETERS)ReceiveThrottleParameters;
 
     RxThrottleParameters->MoreNblsPending = 0;
-    requireDPCRescheduling = ParaNdis_RXTXDPCWorkBody(pContext, RxThrottleParameters->MaxNblsToIndicate);
+    requireDPCRescheduling = ParaNdis_RXTXDPCWorkBody(pContext, pathBundle, MiniportDpcContext, RxThrottleParameters->MaxNblsToIndicate);
 
     if (requireDPCRescheduling)
-        {
-            GROUP_AFFINITY Affinity;
-            GetAffinityForCurrentCpu(&Affinity);
+    {
+        GROUP_AFFINITY Affinity;
+        GetAffinityForCurrentCpu(&Affinity);
 
-            NdisMQueueDpcEx(pContext->InterruptHandle, MessageId, &Affinity, MiniportDpcContext);
-        }
+        NdisMQueueDpcEx(pContext->InterruptHandle, MessageId, &Affinity, pathBundle ? pathBundle : MiniportDpcContext);
+    }
 #else
     UNREFERENCED_PARAMETER(NdisReserved1);
 
     requireDPCRescheduling = ParaNdis_RXTXDPCWorkBody(pContext, PARANDIS_UNLIMITED_PACKETS_TO_INDICATE);
     if (requireDPCRescheduling)
     {
-        NdisMQueueDpc(pContext->InterruptHandle, MessageId, 1 << KeGetCurrentProcessorNumber(), MiniportDpcContext);
+        NdisMQueueDpc(pContext->InterruptHandle, MessageId, 1 << KeGetCurrentProcessorNumber(), pathBundle ? pathBundle : MiniportDpcContext);
     }
 #endif
 

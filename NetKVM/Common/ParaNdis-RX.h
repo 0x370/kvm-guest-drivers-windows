@@ -22,7 +22,9 @@ public:
         ReuseReceiveBufferNoLock(pBuffersDescriptor);
     }
 
-    VOID ProcessRxRing(CCHAR nCurrCpuReceiveQueue);
+    BOOLEAN IsRxBuffersShortage() { return m_NetNofReceiveBuffers < m_MinRxBufferLimit; }
+
+    BOOLEAN ProcessRxRing(CCHAR nCurrCpuReceiveQueue, PVOID pMiniportDPCContext);
 
     BOOLEAN RestartQueue();
 
@@ -42,6 +44,7 @@ private:
     /* list of Rx buffers available for data (under VIRTIO management) */
     LIST_ENTRY              m_NetReceiveBuffers;
     UINT                    m_NetNofReceiveBuffers;
+    UINT                    m_MinRxBufferLimit;
 
     UINT m_nReusedRxBuffersCounter, m_nReusedRxBuffersLimit = 0;
 

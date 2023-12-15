@@ -203,6 +203,8 @@ struct CPUPathBundle : public CPlacementAllocatable {
 
 #define PARANDIS_UNLIMITED_PACKETS_TO_INDICATE  (~0ul)
 
+#define PARANDIS_MIN_RX_BUFFER_PERCENT_DEFAULT 25
+
 static const ULONG PARANDIS_PACKET_FILTERS =
     NDIS_PACKET_TYPE_DIRECTED |
     NDIS_PACKET_TYPE_MULTICAST |
@@ -445,6 +447,7 @@ struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
     ULONG                   ulCurrentVlansFilterSet = false;
     tMulticastData          MulticastData = {};
     UINT                    uNumberOfHandledRXPacketsInDPC = 0;
+    UINT                    MinRxBufferPercent;
     LONG                    counterDPCInside = 0;
     ULONG                   ulPriorityVlanSetting = 0;
     ULONG                   VlanId = 0;
@@ -867,7 +870,9 @@ VOID _Function_class_(KDEFERRED_ROUTINE) MiniportMSIInterruptCXDpc(
     IN PVOID                  NdisReserved2
 );
 
-bool ParaNdis_RXTXDPCWorkBody(PARANDIS_ADAPTER *pContext,
+bool ParaNdis_RXTXDPCWorkBody(PARANDIS_ADAPTER* pContext,
+    CPUPathBundle* pathBundle,
+    PVOID pMiniportDpcContext,
     ULONG ulMaxPacketsToIndicate);
 
 
