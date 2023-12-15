@@ -106,6 +106,8 @@ typedef struct _tagConfigurationEntries
     tConfigurationEntry USOv4Supported;
     tConfigurationEntry USOv6Supported;
 #endif
+    tConfigurationEntry MinRxBufferPercent;
+    tConfigurationEntry MaxInflightAllocMultiplier;
 }tConfigurationEntries;
 
 static const tConfigurationEntries defaultConfiguration =
@@ -143,6 +145,8 @@ static const tConfigurationEntries defaultConfiguration =
     { "*UsoIPv4", 1, 0, 1},
     { "*UsoIPv6", 1, 0, 1},
 #endif
+    { "MinRxBufferPercent", 25, 0, 100},
+    { "MaxInflightAllocMultiplier", 2, 0, 100}
 };
 
 static void ParaNdis_ResetVirtIONetDevice(PARANDIS_ADAPTER *pContext)
@@ -276,6 +280,8 @@ static void ReadNicConfiguration(PARANDIS_ADAPTER *pContext, PUCHAR pNewMACAddre
             GetConfigurationEntry(cfg, &pConfiguration->USOv4Supported);
             GetConfigurationEntry(cfg, &pConfiguration->USOv6Supported);
 #endif
+            GetConfigurationEntry(cfg, &pConfiguration->MinRxBufferPercent);
+            GetConfigurationEntry(cfg, &pConfiguration->MaxInflightAllocMultiplier);
 
             bDebugPrint = pConfiguration->isLogEnabled.ulValue;
             virtioDebugLevel = pConfiguration->debugLevel.ulValue;
@@ -283,6 +289,8 @@ static void ReadNicConfiguration(PARANDIS_ADAPTER *pContext, PUCHAR pNewMACAddre
             pContext->maxFreeTxDescriptors = pConfiguration->TxCapacity.ulValue;
             pContext->NetMaxReceiveBuffers = pConfiguration->RxCapacity.ulValue;
             pContext->uNumberOfHandledRXPacketsInDPC = pConfiguration->NumberOfHandledRXPacketsInDPC.ulValue;
+            pContext->uMinRxBufferPercent = pConfiguration->MinRxBufferPercent.ulValue;
+            pContext->uMaxInflightAllocMultiplier = pConfiguration->MaxInflightAllocMultiplier.ulValue;
             pContext->bDoSupportPriority = pConfiguration->PrioritySupport.ulValue != 0;
             pContext->Offload.flagsValue = 0;
             // TX caps: 1 - TCP, 2 - UDP, 4 - IP, 8 - TCPv6, 16 - UDPv6

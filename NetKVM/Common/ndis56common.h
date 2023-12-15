@@ -123,6 +123,9 @@ typedef struct _tagCompletePhysicalAddress
 struct _tagRxNetDescriptor;
 typedef struct _tagRxNetDescriptor  RxNetDescriptor, *pRxNetDescriptor;
 
+BOOLEAN ParaNdis_BindRxBufferToPacket(PARANDIS_ADAPTER* pContext, pRxNetDescriptor p);
+void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER* pContext, pRxNetDescriptor p);
+
 static __inline BOOLEAN ParaNDIS_IsQueueInterruptEnabled(struct virtqueue * _vq);
 
 struct PARANDIS_RECEIVE_QUEUE
@@ -381,6 +384,13 @@ typedef struct _tagNET_PACKET_INFO
     ULONG dataLength;
 } NET_PACKET_INFO, *PNET_PACKET_INFO;
 
+enum BUFFER_ALLOC_STAGE
+{
+    STAGE_ALLOCATE_FIRST_PAGE,
+    STAGE_ALLOCATE_REST_PAGE,
+    STAGE_ALLOCATE_DONE
+};
+
 struct _tagRxNetDescriptor {
     LIST_ENTRY listEntry;
     LIST_ENTRY ReceiveQueueListEntry;
@@ -389,12 +399,15 @@ struct _tagRxNetDescriptor {
     struct VirtIOBufferDescriptor *BufferSGArray;
     tCompletePhysicalAddress      *PhysicalPages;
     ULONG                          BufferSGLength;
+    ULONG                          TotalPages;
+    ULONG                          CurrPage;
     tCompletePhysicalAddress       IndirectArea;
     tPacketHolderType              Holder;
 
     NET_PACKET_INFO PacketInfo;
 
     CParaNdisRX*                   Queue;
+    BUFFER_ALLOC_STAGE             Stage;
 };
 
 struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
@@ -445,6 +458,8 @@ struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
     ULONG                   ulCurrentVlansFilterSet = false;
     tMulticastData          MulticastData = {};
     UINT                    uNumberOfHandledRXPacketsInDPC = 0;
+    UINT                    uMinRxBufferPercent = 0;
+    UINT                    uMaxInflightAllocMultiplier = 0;
     LONG                    counterDPCInside = 0;
     ULONG                   ulPriorityVlanSetting = 0;
     ULONG                   VlanId = 0;

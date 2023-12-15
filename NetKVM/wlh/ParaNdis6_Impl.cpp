@@ -504,11 +504,70 @@ static VOID SharedMemAllocateCompleteHandler(
     IN PVOID  Context
     )
 {
-    UNREFERENCED_PARAMETER(MiniportAdapterContext);
-    UNREFERENCED_PARAMETER(VirtualAddress);
-    UNREFERENCED_PARAMETER(PhysicalAddress);
-    UNREFERENCED_PARAMETER(Length);
-    UNREFERENCED_PARAMETER(Context);
+    PPARANDIS_ADAPTER   AdapterContext = (PPARANDIS_ADAPTER)MiniportAdapterContext;
+    pRxNetDescriptor    p = (pRxNetDescriptor)Context;
+
+    NETKVM_ASSERT(AdapterContext && p && p->Stage != STAGE_ALLOCATE_DONE);
+
+    CParaNdisRX* RxQueue = p->Queue;
+
+    if (!VirtualAddress)
+    {
+        DPrintf(0, "allocate runtime shared memory failed!\n");
+        goto error_exit;
+    }
+
+    NETKVM_ASSERT(PhysicalAddress && PhysicalAddress->QuadPart);
+
+    p->PhysicalPages[p->BufferSGLength].Physical = *PhysicalAddress;
+    p->PhysicalPages[p->BufferSGLength].Virtual = VirtualAddress;
+    p->PhysicalPages[p->BufferSGLength].size = Length;
+
+    p->BufferSGArray[p->BufferSGLength].physAddr = p->PhysicalPages[p->BufferSGLength].Physical;
+    p->BufferSGArray[p->BufferSGLength].length = p->PhysicalPages[p->BufferSGLength].size;
+    p->BufferSGLength++;
+    p->CurrPage += (Length / PAGE_SIZE);
+
+    if (p->CurrPage < p->TotalPages)
+    {
+        //first page allocate done. try allocate the rest pages
+        if (NdisMAllocateSharedMemoryAsyncEx(AdapterContext->DmaHandle, PAGE_SIZE * (p->TotalPages - p->CurrPage), TRUE, p) != NDIS_STATUS_PENDING)
+        {
+            DPrintf(0, "NdisMAllocateSharedMemoryAsyncEx failed in handler!\n");
+            goto error_exit;
+        }
+    }
+    else if (p->CurrPage == p->TotalPages)
+    {
+        //the rest pages allocate done
+
+        //First page is for virtio header, size needs to be adjusted correspondingly
+        p->BufferSGArray[0].length = AdapterContext->nVirtioHeaderSize;
+
+        ULONG indirectAreaOffset = ALIGN_UP(AdapterContext->nVirtioHeaderSize, ULONGLONG);
+        //Pre-cache indirect area addresses
+        p->IndirectArea.Physical.QuadPart = p->PhysicalPages[0].Physical.QuadPart + indirectAreaOffset;
+        p->IndirectArea.Virtual = RtlOffsetToPointer(p->PhysicalPages[0].Virtual, indirectAreaOffset);
+        p->IndirectArea.size = PAGE_SIZE - indirectAreaOffset;
+
+        if (!ParaNdis_BindRxBufferToPacket(AdapterContext, p))
+            goto error_exit;
+
+        p->Stage = STAGE_ALLOCATE_DONE;
+        
+        RxQueue->ReuseReceiveBuffer(p);
+
+        RxQueue->UnRegisterInflightAsyncAlloc();
+        AdapterContext->m_RxStateMachine.UnregisterOutstandingItem();
+    }
+
+    return;
+
+error_exit:
+    ParaNdis_FreeRxBufferDescriptor(AdapterContext, p);
+    RxQueue->UnRegisterInflightAsyncAlloc();
+    AdapterContext->m_RxStateMachine.UnregisterOutstandingItem();
+    return;
 }
 
 /*

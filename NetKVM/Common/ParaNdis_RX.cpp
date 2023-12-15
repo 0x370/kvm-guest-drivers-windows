@@ -30,7 +30,7 @@ static void ParaNdis_UnbindRxBufferFromPacket(
     }
 }
 
-static BOOLEAN ParaNdis_BindRxBufferToPacket(
+BOOLEAN ParaNdis_BindRxBufferToPacket(
     PARANDIS_ADAPTER *pContext,
     pRxNetDescriptor p)
 {
@@ -57,7 +57,7 @@ error_exit:
     return FALSE;
 }
 
-static void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER *pContext, pRxNetDescriptor p)
+void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER *pContext, pRxNetDescriptor p)
 {
     ULONG i;
 
@@ -66,13 +66,13 @@ static void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER *pContext, pRxNetDe
     {
         ParaNdis_FreePhysicalMemory(pContext, &p->PhysicalPages[i]);
     }
-
+    
     if (p->BufferSGArray) NdisFreeMemory(p->BufferSGArray, 0, 0);
     if (p->PhysicalPages) NdisFreeMemory(p->PhysicalPages, 0, 0);
     NdisFreeMemory(p, 0, 0);
 }
 
-CParaNdisRX::CParaNdisRX() : m_nReusedRxBuffersCounter(0), m_NetNofReceiveBuffers(0)
+CParaNdisRX::CParaNdisRX() : m_nReusedRxBuffersCounter(0), m_NetNofReceiveBuffers(0), m_MinReceiveBuffers(0), m_MaxInflightAlloc(0), m_InflightAsyncAlloc(0)
 {
     InitializeListHead(&m_NetReceiveBuffers);
 }
@@ -128,7 +128,9 @@ int CParaNdisRX::PrepareReceiveBuffers()
     }
     /* TODO - NetMaxReceiveBuffers should take into account all queues */
     m_Context->NetMaxReceiveBuffers = m_NetNofReceiveBuffers;
-    DPrintf(0, "[%s] MaxReceiveBuffers %d\n", __FUNCTION__, m_Context->NetMaxReceiveBuffers);
+    m_MinReceiveBuffers = m_NetNofReceiveBuffers * m_Context->uMinRxBufferPercent / 100;
+    m_MaxInflightAlloc = m_NetNofReceiveBuffers * m_Context->uMaxInflightAllocMultiplier;
+    DPrintf(0, "[%s] MaxReceiveBuffers:%d MaxInflightAlloc:%u MinReceiveBuffers:%u\n", __FUNCTION__, m_Context->NetMaxReceiveBuffers, m_MaxInflightAlloc, m_MinReceiveBuffers);
     m_Reinsert = true;
 
     return nRet;
@@ -191,12 +193,62 @@ pRxNetDescriptor CParaNdisRX::CreateRxDescriptorOnInit()
 
     if (!ParaNdis_BindRxBufferToPacket(m_Context, p))
         goto error_exit;
-
+    
+    p->Stage = STAGE_ALLOCATE_DONE;
     return p;
 
 error_exit:
     ParaNdis_FreeRxBufferDescriptor(m_Context, p);
     return NULL;
+}
+
+VOID CParaNdisRX::CreateRxDescriptorOnRuntime()
+{
+    //For RX packets we allocate following pages
+    //  1 page for virtio header and indirect buffers array
+    //  X pages needed to fit maximal length buffer of data
+    //  The assumption is virtio header and indirect buffers array fit 1 page
+    ULONG ulNumPages = m_Context->MaxPacketSize.nMaxDataSizeHwRx / PAGE_SIZE + 2;
+
+    pRxNetDescriptor p = (pRxNetDescriptor)ParaNdis_AllocateMemory(m_Context, sizeof(*p));
+    if (p == NULL)
+    {
+        UnRegisterInflightAsyncAlloc();
+        return;
+    }
+
+    NdisZeroMemory(p, sizeof(*p));
+
+    p->BufferSGArray = (struct VirtIOBufferDescriptor*)
+        ParaNdis_AllocateMemory(m_Context, sizeof(*p->BufferSGArray) * ulNumPages);
+    if (p->BufferSGArray == NULL) goto error_exit;
+
+    p->PhysicalPages = (tCompletePhysicalAddress*)
+        ParaNdis_AllocateMemory(m_Context, sizeof(*p->PhysicalPages) * ulNumPages);
+    if (p->PhysicalPages == NULL) goto error_exit;
+
+    p->TotalPages = ulNumPages;
+    p->CurrPage = 0;
+    p->BufferSGLength = 0;
+    p->Queue = this;
+    p->Stage = STAGE_ALLOCATE_FIRST_PAGE;
+
+    if (m_Context->m_RxStateMachine.RegisterOutstandingItem())
+    {
+        //allocate first page separately, when SharedMemAllocateCompleteHandler get called by NDIS, allocate the rest pages
+        if (NdisMAllocateSharedMemoryAsyncEx(m_Context->DmaHandle, PAGE_SIZE, TRUE, p) != NDIS_STATUS_PENDING)
+        {
+            m_Context->m_RxStateMachine.UnregisterOutstandingItem();
+            DPrintf(0, "NdisMAllocateSharedMemoryAsyncEx failed!\n");
+            goto error_exit;
+        }
+        return;
+    }
+    
+error_exit:
+    ParaNdis_FreeRxBufferDescriptor(m_Context, p);
+    UnRegisterInflightAsyncAlloc();
+    return;
 }
 
 /* TODO - make it method in pRXNetDescriptor */
@@ -224,22 +276,22 @@ void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
 {
     DEBUG_ENTRY(4);
 
+    if (m_NetNofReceiveBuffers + 1 > m_Context->NetMaxReceiveBuffers)
+    {
+        ParaNdis_FreeRxBufferDescriptor(m_Context, pBuffersDescriptor);
+        return;
+    }
+
     if (!m_Reinsert)
     {
         InsertTailList(&m_NetReceiveBuffers, &pBuffersDescriptor->listEntry);
         m_NetNofReceiveBuffers++;
         return;
-    } 
+    }
     else if (AddRxBufferToQueue(pBuffersDescriptor))
     {
         InsertTailList(&m_NetReceiveBuffers, &pBuffersDescriptor->listEntry);
         m_NetNofReceiveBuffers++;
-
-        if (m_NetNofReceiveBuffers > m_Context->NetMaxReceiveBuffers)
-        {
-            DPrintf(0, " Error: NetNofReceiveBuffers > NetMaxReceiveBuffers(%d>%d)\n",
-                m_NetNofReceiveBuffers, m_Context->NetMaxReceiveBuffers);
-        }
 
         /* TODO - nReusedRXBuffers per queue or per context ?*/
         if (++m_nReusedRxBuffersCounter >= m_nReusedRxBuffersLimit)
@@ -388,6 +440,18 @@ VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
     {
         RemoveEntryList(&pBufferDescriptor->listEntry);
         m_NetNofReceiveBuffers--;
+
+        if (m_NetNofReceiveBuffers < m_MinReceiveBuffers)
+        {
+            if (RegisterInflightAsyncAlloc(1) < (LONG)m_MaxInflightAlloc)
+            {
+                CreateRxDescriptorOnRuntime();
+            }
+            else
+            {
+                UnRegisterInflightAsyncAlloc();
+            }
+        }
 
         BOOLEAN packetAnalysisRC;
 

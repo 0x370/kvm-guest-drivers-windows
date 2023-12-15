@@ -38,10 +38,23 @@ public:
 
     PARANDIS_RECEIVE_QUEUE &UnclassifiedPacketsQueue() { return m_UnclassifiedPacketsQueue;  }
 
+    LONG RegisterInflightAsyncAlloc(int val = 1)
+    {
+        return InterlockedAdd(&m_InflightAsyncAlloc, val);
+    }
+
+    LONG UnRegisterInflightAsyncAlloc()
+    {
+        return InterlockedDecrement(&m_InflightAsyncAlloc);
+    }
+
 private:
     /* list of Rx buffers available for data (under VIRTIO management) */
     LIST_ENTRY              m_NetReceiveBuffers;
     UINT                    m_NetNofReceiveBuffers;
+    UINT                    m_MinReceiveBuffers;
+    UINT                    m_MaxInflightAlloc;
+    LONG volatile           m_InflightAsyncAlloc;
 
     UINT m_nReusedRxBuffersCounter, m_nReusedRxBuffersLimit = 0;
 
@@ -53,6 +66,7 @@ private:
 private:
     int PrepareReceiveBuffers();
     pRxNetDescriptor CreateRxDescriptorOnInit();
+    VOID CreateRxDescriptorOnRuntime();
 };
 
 #ifdef PARANDIS_SUPPORT_RSS
