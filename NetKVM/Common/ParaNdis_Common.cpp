@@ -1705,7 +1705,10 @@ BOOLEAN RxDPCWorkBody(PARANDIS_ADAPTER *pContext, CPUPathBundle *pathBundle, ULO
         if(pContext->m_RxStateMachine.RegisterOutstandingItems(nIndicate))
         {
             NdisMIndicateReceiveNetBufferLists(pContext->MiniportHandle,
-                                                indicate, 0, nIndicate, NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL);
+                indicate, 0, nIndicate, NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL | NDIS_RECEIVE_FLAGS_RESOURCES);
+
+            ParaNdis_ReuseRxNBLs(indicate);
+            pContext->m_RxStateMachine.UnregisterOutstandingItems(nIndicate);
         }
         else
         {
